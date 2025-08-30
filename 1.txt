@@ -1,0 +1,60 @@
+# STEP 1: Install dependencies
+!pip install pypdf transformers accelerate bitsandbytes sentence-transformers faiss-cpu
+
+# STEP 2: Import libraries
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer
+import faiss
+from PyPDF2 import PdfReader
+
+# STEP 3: Add your Hugging Face Token
+from huggingface_hub import login
+login("YOUR_HUGGINGFACE_TOKEN_HERE")   # 🔑 replace with your token
+
+# STEP 4: Function to extract text from PDF
+def extract_pdf_text(pdf_path):
+    reader = PdfReader(pdf_path)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() + "\n"
+    return text
+
+# STEP 5: Upload a PDF
+from google.colab import files
+uploaded = files.upload()
+pdf_path = list(uploaded.keys())[0]
+pdf_text = extract_pdf_text(pdf_path)
+
+# STEP 6: Create embeddings of PDF text chunks
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Split into chunks
+def split_text(text, chunk_size=500):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), chunk_size):
+        chunks.append(" ".join(words[i:i+chunk_size]))
+    return chunks
+
+chunks = split_text(pdf_text)
+embeddings = model.encode(chunks)
+
+# Create FAISS index
+dimension = embeddings.shape[1]
+index = faiss.IndexFlatL2(dimension)
+index.add(embeddings)
+
+# STEP 7: Load a Q&A model from Hugging Face
+qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2")
+
+# STEP 8: Function for Q&A
+def ask_question(question, top_k=2):
+    q_emb = model.encode([question])
+    D, I = index.search(q_emb, top_k)
+    context = " ".join([chunks[i] for i in I[0]])
+    answer = qa_pipeline(question=question, context=context)
+    return answer['answer']
+
+# STEP 9: Try asking questions
+print(ask_question("What is the main topic of this PDF?"))
+print(ask_question("Explain the conclusion of the paper."))
