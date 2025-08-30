@@ -1,0 +1,133 @@
+!pip install pdfplumber transformers sentence-transformers torch gtts ipywidgets graphviz matplotlib wordcloud --quiet
+
+import pdfplumber
+from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
+from sentence_transformers import SentenceTransformer
+from gtts import gTTS
+from IPython.display import Audio, display, HTML
+import ipywidgets as widgets
+from graphviz import Digraph
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+from google.colab import files
+
+
+upload = files.upload()
+pdf_path = list(upload.keys())[0]
+
+
+text = ""
+with pdfplumber.open(pdf_path) as pdf:
+    for page in pdf.pages:
+        text += page.extract_text() + "\n"
+
+
+summ_model_name = "google/pegasus-xsum"
+summ_tokenizer = AutoTokenizer.from_pretrained(summ_model_name)
+summ_model = AutoModelForSeq2SeqLM.from_pretrained(summ_model_name)
+
+
+qa_model = pipeline("question-answering", model="deepset/roberta-base-squad2")
+
+
+embed_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+sentences = [s for s in text.split('.') if s.strip()]
+embeddings = embed_model.encode(sentences, convert_to_tensor=True)
+
+trans_model_name = "Helsinki-NLP/opus-mt-en-hi"
+trans_tokenizer = AutoTokenizer.from_pretrained(trans_model_name)
+trans_model = AutoModelForSeq2SeqLM.from_pretrained(trans_model_name)
+
+def summarize_text(text):
+    inputs = summ_tokenizer(text, truncation=True, return_tensors="pt", max_length=1024)
+    summary_ids = summ_model.generate(inputs["input_ids"], max_length=300, min_length=60, length_penalty=2.0, num_beams=4)
+    summary = summ_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+    return summary
+
+
+def translate_text(text, src="en", tgt="hi"):
+    inputs = trans_tokenizer(text, return_tensors="pt", truncation=True)
+    outputs = trans_model.generate(**inputs, max_length=512)
+    translated = trans_tokenizer.decode(outputs[0], skip_special_tokens=True)
+    return translated
+
+
+def generate_flowchart(text):
+    dot = Digraph(comment='PDF Flowchart')
+    lines = [line.strip() for line in text.split('.') if line.strip()]
+    for i, line in enumerate(lines[:10]):  # limit to first 10 for clarity
+        dot.node(str(i), line[:20]+"..." if len(line)>20 else line)
+        if i>0:
+            dot.edge(str(i-1), str(i))
+    return dot
+
+
+def generate_wordcloud(text):
+    wc = WordCloud(width=800, height=400, background_color='white').generate(text)
+    plt.figure(figsize=(10,5))
+    plt.imshow(wc, interpolation='bilinear')
+    plt.axis('off')
+    plt.show()
+
+
+def speak_text(text):
+    tts = gTTS(text)
+    tts.save("audio.mp3")
+    display(Audio("audio.mp3", autoplay=True))
+
+
+query_input = widgets.Text(value='', placeholder='Ask anything about the PDF...', description='Query:')
+voice_button = widgets.Button(description="Speak Summary")
+search_button = widgets.Button(description="Search Answer")
+summ_button = widgets.Button(description="Generate Summary")
+flow_button = widgets.Button(description="Generate Flowchart")
+trans_button = widgets.Button(description="Translate Summary")
+
+output = widgets.Output()
+display(query_input, search_button, summ_button, voice_button, flow_button, trans_button, output)
+
+
+def on_summ_click(b):
+    with output:
+        output.clear_output()
+        summary = summarize_text(text)
+        print("Step-by-Step Summary:\n", summary)
+
+def on_voice_click(b):
+    with output:
+        output.clear_output()
+        summary = summarize_text(text)
+        print("Speaking Summary...")
+        speak_text(summary)
+
+def on_search_click(b):
+    with output:
+        output.clear_output()
+        query = query_input.value
+        if query.strip()=='':
+            print("Enter a query first!")
+            return
+        answer = qa_model(question=query, context=text)
+        print("Answer:", answer['answer'])
+
+def on_flow_click(b):
+    with output:
+        output.clear_output()
+        dot = generate_flowchart(text)
+        display(dot)
+
+def on_trans_click(b):
+    with output:
+        output.clear_output()
+        summary = summarize_text(text)
+        translation = translate_text(summary)
+        print("Translated Summary:\n", translation)
+
+summ_button.on_click(on_summ_click)
+voice_button.on_click(on_voice_click)
+search_button.on_click(on_search_click)
+flow_button.on_click(on_flow_click)
+trans_button.on_click(on_trans_click)
+
+
+print("PDF Loaded! Use the buttons above to summarize, query, translate, generate flowchart, or speak the summary.")
