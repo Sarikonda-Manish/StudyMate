@@ -1,0 +1,120 @@
+!pip install gradio transformers graphviz pdfplumber gTTS requests -q
+
+import gradio as gr
+import pdfplumber, random, os, requests
+from transformers import pipeline
+from graphviz import Digraph
+from gtts import gTTS
+
+# ------------------ CONFIG ------------------
+HF_TOKEN = "your_huggingface_token_here"   # 🔑 Paste HuggingFace token
+GRANITE_API_KEY = "your_ibm_api_key_here"  # 🔑 Paste IBM Granite API key
+GRANITE_URL = "https://us-south.ml.cloud.ibm.com/ml/v1/text/generation?version=2023-05-29"
+# --------------------------------------------
+
+# Hugging Face Pipelines
+qa_pipeline = pipeline("question-answering", model="distilbert-base-cased-distilled-squad", use_auth_token=HF_TOKEN)
+translator = pipeline("translation_en_to_fr", use_auth_token=HF_TOKEN)
+
+def call_granite(prompt):
+    """Call IBM Granite API for summarization."""
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {GRANITE_API_KEY}"
+    }
+    payload = {
+        "model_id": "ibm/granite-13b-chat-v2",
+        "input": prompt,
+        "parameters": {"decoding_method": "greedy", "max_new_tokens": 250}
+    }
+    try:
+        r = requests.post(GRANITE_URL, headers=headers, json=payload)
+        r.raise_for_status()
+        data = r.json()
+        return data["results"][0]["generated_text"]
+    except Exception as e:
+        return f"[Granite API Error] {e}"
+
+def process_pdf(pdf_file):
+    text = ""
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            if page.extract_text():
+                text += page.extract_text() + "\n"
+    return text
+
+def study_assistant(pdf_file, query, target_lang, voice_input):
+    text = process_pdf(pdf_file)
+
+    # ✅ Step-by-step Summary (Granite)
+    summary = call_granite(f"Summarize this PDF content step by step:\n\n{text[:3000]}")
+
+    # ✅ Flowchart
+    flow = Digraph(format="png")
+    flow.attr(rankdir="TB", size="8")
+    steps = summary.split(". ")
+    for i, step in enumerate(steps):
+        flow.node(str(i), step.strip()[:40])
+        if i > 0: flow.edge(str(i-1), str(i))
+    flow.render("flowchart", cleanup=True)
+
+    # ✅ Mindmap
+    mind = Digraph(format="png")
+    mind.attr(rankdir="LR", size="8")
+    root = "PDF Content"
+    mind.node(root, shape="ellipse", style="filled", color="lightblue")
+    for i, kw in enumerate(list(set(text.split()))[:6]):
+        mind.node(str(i), kw)
+        mind.edge(root, str(i))
+    mind.render("mindmap", cleanup=True)
+
+    # ✅ Q&A
+    answer = qa_pipeline(question=query, context=text[:3000])["answer"] if query else ""
+
+    # ✅ Translation
+    translated = translator(summary)[0]["translation_text"] if target_lang else summary
+
+    # ✅ Keywords
+    keywords = ", ".join(list(set(text.split()[:20])))
+
+    # ✅ Notes
+    notes = "\n".join([f"- {line.strip()}" for line in summary.split(". ") if line.strip()])
+
+    # ✅ Quiz
+    quiz = ""
+    sentences = summary.split(". ")
+    for i, sent in enumerate(sentences[:3]):
+        quiz += f"Q{i+1}. {sent.strip()}?\n"
+        quiz += "   A. True\n   B. False\n   C. Not Given\n   D. Irrelevant\n\n"
+
+    # ✅ TTS
+    tts = gTTS(summary)
+    tts.save("summary.mp3")
+
+    return summary, "flowchart.png", "mindmap.png", answer, translated, keywords, notes, quiz, "summary.mp3"
+
+# ----------------- Gradio UI -----------------
+demo = gr.Interface(
+    fn=study_assistant,
+    inputs=[
+        gr.File(label="📂 Upload PDF", type="filepath"),
+        gr.Textbox(label="🔍 Ask a Question"),
+        gr.Textbox(label="🌍 Translate to (e.g., fr for French)", placeholder="fr"),
+        gr.Audio(type="filepath", label="🎤 Voice Input (optional)")
+    ],
+    outputs=[
+        gr.Textbox(label="📝 Step-by-Step Summary"),
+        gr.Image(label="📊 Flowchart"),
+        gr.Image(label="🌳 Mindmap"),
+        gr.Textbox(label="💡 Answer to Query"),
+        gr.Textbox(label="🌍 Translation"),
+        gr.Textbox(label="🔑 Keywords"),
+        gr.Textbox(label="📚 Notes"),
+        gr.Textbox(label="🧩 Quiz"),
+        gr.Audio(label="🔊 Text-to-Speech")
+    ],
+    title="📘 StudyMate - AI PDF Assistant",
+    description="Upload a PDF to get summary (Granite), flowchart, mindmap, Q&A, translation, keywords, notes, quiz, and voice output."
+)
+
+demo.launch(share=True)
